@@ -1,0 +1,90 @@
+name: Auto Build All Supported Apps
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Har Sunday auto-run
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apps:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # Ek app fail ho to dusra na ruke
+      matrix:
+        app:
+          - name: "YouTube"
+            package: "com.google.android.youtube"
+            dir: "youtube"
+          - name: "YouTube-Music"
+            package: "com.google.android.apps.youtube.music"
+            dir: "youtube-music"
+          - name: "Reddit"
+            package: "com.reddit.frontpage"
+            dir: "reddit"
+          - name: "Instagram"
+            package: "com.instagram.android"
+            dir: "instagram"
+          - name: "Twitter-X"
+            package: "com.twitter.android"
+            dir: "x"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Tools (apkeep & jq)
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq curl wget
+          curl -s https://api.github.com/repos/EFForg/apkeep/releases/latest \
+            | jq -r '.assets[] | select(.name | contains("x86_64-unknown-linux-gnu.tar.gz")) | .browser_download_url' \
+            | wget -qi - -O apkeep.tar.gz
+          tar -xvf apkeep.tar.gz
+          sudo mv apkeep /usr/local/bin/
+
+      - name: Setup Reseam CLI & Bundle
+        run: |
+          wget -q https://reseam.app/dl/reseam-linux-x64 -O reseam || true
+          chmod +x reseam
+          curl -sSL https://reseam.app/dl/patches.reseam -o patches.reseam || true
+
+      - name: Detect Supported Version for ${{ matrix.app.name }}
+        id: version
+        run: |
+          # Reseam ke app folder se compatible version nikalna
+          VER=$(curl -sSL "https://raw.githubusercontent.com/Reseam/patches/main/apps/${{ matrix.app.dir }}/README.md" \
+            | grep -oP '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 || echo "")
+          
+          echo "Target Version: $VER"
+          echo "app_version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Download APK
+        run: |
+          PKG="${{ matrix.app.package }}"
+          VER="${{ steps.version.outputs.app_version }}"
+          
+          if [ -n "$VER" ]; then
+            apkeep -a "${PKG}@${VER}" -d APKMirror . || apkeep -a "$PKG" -d APKMirror .
+          else
+            apkeep -a "$PKG" -d APKMirror .
+          fi
+          
+          mv *.apk base.apk
+
+      - name: Patch APK with Reseam
+        run: |
+          ./reseam patch base.apk \
+            --bundle patches.reseam \
+            --output "${{ matrix.app.name }}-patched.apk" \
+            --leave-out-failed
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "auto-build-${{ github.run_number }}"
+          name: "Auto-Patched Apps Build #${{ github.run_number }}"
+          files: "${{ matrix.app.name }}-patched.apk"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
